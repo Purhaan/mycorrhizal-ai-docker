@@ -2,6 +2,7 @@
 """
 REAL TRAINABLE MYCORRHIZAL AI SYSTEM - FIXED VERSION
 Train with real images + masks, achieve 80% accuracy with 25 images per species
+Fixed dtype errors and improved training stability
 """
 
 import streamlit as st
@@ -86,7 +87,7 @@ class MycorrhizalDataset(Dataset):
                 # Optical transforms
                 A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
                 A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
-                A.RandomGamma(gamma_limit=(0.7, 1.3), p=0.3),
+                A.RandomGamma(gamma_limit=(1.0, 1.5), p=0.3),
                 
                 # Noise and blur
                 A.GaussNoise(var_limit=(10, 50), p=0.2),
@@ -127,13 +128,19 @@ class MycorrhizalDataset(Dataset):
             mask = cv2.resize(mask, (256, 256))
             
             # Binary threshold for mask - ensure proper binary format
-            mask = (mask > 127).astype(np.uint8)
+            mask = (mask > 127).astype(np.float32)  # Use float32 instead of uint8
             
             # Validate mask has both classes
-            if np.sum(mask) == 0:
-                st.warning(f"Mask {self.mask_paths[idx]} has no positive pixels")
-            elif np.sum(mask) == mask.size:
-                st.warning(f"Mask {self.mask_paths[idx]} is completely positive")
+            mask_sum = np.sum(mask)
+            total_pixels = mask.size
+            colonization_pct = (mask_sum / total_pixels) * 100
+            
+            if mask_sum == 0:
+                st.warning(f"⚠️ Mask {os.path.basename(self.mask_paths[idx])} has NO mycorrhizal structures (0% colonization)")
+            elif mask_sum == total_pixels:
+                st.warning(f"⚠️ Mask {os.path.basename(self.mask_paths[idx])} is 100% mycorrhizal (may be incorrect)")
+            else:
+                st.info(f"✅ Mask {os.path.basename(self.mask_paths[idx])}: {colonization_pct:.1f}% colonization")
             
             # Apply augmentations
             if self.augmentation:
@@ -141,17 +148,25 @@ class MycorrhizalDataset(Dataset):
                 image = augmented['image']
                 mask = augmented['mask']
             
-            # Convert mask to tensor if not already
+            # Ensure mask is float tensor
             if not isinstance(mask, torch.Tensor):
                 mask = torch.from_numpy(mask).float()
+            else:
+                mask = mask.float()  # Ensure it's float type
+            
+            # Ensure image is float tensor
+            if not isinstance(image, torch.Tensor):
+                image = torch.from_numpy(image).float()
+            else:
+                image = image.float()
             
             return image, mask
             
         except Exception as e:
             st.error(f"Error loading data at index {idx}: {e}")
             # Return a dummy sample to prevent crash
-            dummy_image = torch.zeros(3, 256, 256)
-            dummy_mask = torch.zeros(256, 256)
+            dummy_image = torch.zeros(3, 256, 256, dtype=torch.float32)
+            dummy_mask = torch.zeros(256, 256, dtype=torch.float32)
             return dummy_image, dummy_mask
 
 class UNet(nn.Module):
@@ -316,7 +331,35 @@ class MycorrhizalTrainer:
         if len(image_paths) < 5:
             raise ValueError(f"Need at least 5 matched image-mask pairs, found {len(image_paths)}")
         
+        # WARNING: Check for insufficient training data
+        if len(image_paths) < 25:
+            st.error(f"⚠️ **INSUFFICIENT TRAINING DATA**: Found only {len(image_paths)} samples!")
+            st.error("🚨 **Expected Issues:**")
+            st.error("• Model will severely overfit")
+            st.error("• Predictions will be unreliable") 
+            st.error("• May predict 100% colonization for everything")
+            st.error("**Recommendation**: Upload at least 25 diverse images per species")
+        
         st.success(f"✅ Found {len(image_paths)} matched image-mask pairs")
+        
+        # Validate mask quality BEFORE training
+        st.info("🔍 Validating mask quality...")
+        mask_stats = []
+        for mask_path in mask_paths:
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if mask is not None:
+                mask_binary = (mask > 127).astype(np.float32)
+                colonization_pct = (np.sum(mask_binary) / mask_binary.size) * 100
+                mask_stats.append(colonization_pct)
+        
+        if mask_stats:
+            avg_colonization = np.mean(mask_stats)
+            st.info(f"📊 Average colonization in training data: {avg_colonization:.1f}%")
+            
+            if avg_colonization > 80:
+                st.warning("⚠️ Very high average colonization - model may predict 100% for everything")
+            elif avg_colonization < 5:
+                st.warning("⚠️ Very low average colonization - check if masks are correct")
         
         # Split data
         total_size = len(image_paths)
@@ -339,8 +382,8 @@ class MycorrhizalTrainer:
         train_dataset = MycorrhizalDataset(train_img_paths, train_mask_paths, augment=True)
         val_dataset = MycorrhizalDataset(val_img_paths, val_mask_paths, augment=False)
         
-        # Adjust batch size based on available memory
-        batch_size = 2 if DEVICE.type == 'cuda' else 1
+        # Adjust batch size based on available memory and data size
+        batch_size = min(2 if DEVICE.type == 'cuda' else 1, len(train_img_paths))
         
         # Create data loaders
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -385,12 +428,28 @@ class MycorrhizalTrainer:
         
         try:
             for batch_idx, (images, masks) in enumerate(train_loader):
-                images = images.to(DEVICE)
-                masks = masks.to(DEVICE).unsqueeze(1)
+                # Ensure proper data types
+                images = images.to(DEVICE).float()  # Ensure float32
+                masks = masks.to(DEVICE).float().unsqueeze(1)  # Ensure float32 and add channel dim
+                
+                # Validate tensor shapes and types
+                if images.dtype != torch.float32:
+                    st.warning(f"Converting images from {images.dtype} to float32")
+                    images = images.float()
+                    
+                if masks.dtype != torch.float32:
+                    st.warning(f"Converting masks from {masks.dtype} to float32")
+                    masks = masks.float()
                 
                 self.optimizer.zero_grad()
                 
                 outputs = self.model(images)
+                
+                # Ensure output and target have same shape
+                if outputs.shape != masks.shape:
+                    st.warning(f"Shape mismatch: outputs {outputs.shape} vs masks {masks.shape}")
+                    masks = F.interpolate(masks, size=outputs.shape[2:], mode='nearest')
+                
                 loss = self.criterion(outputs, masks)
                 
                 # Check for NaN loss
@@ -410,6 +469,7 @@ class MycorrhizalTrainer:
                 
         except Exception as e:
             st.error(f"Error during training epoch: {e}")
+            st.error(f"Error type: {type(e).__name__}")
             return float('inf')
         
         return total_loss / max(num_batches, 1)
@@ -424,10 +484,16 @@ class MycorrhizalTrainer:
         try:
             with torch.no_grad():
                 for images, masks in val_loader:
-                    images = images.to(DEVICE)
-                    masks = masks.to(DEVICE).unsqueeze(1)
+                    # Ensure proper data types
+                    images = images.to(DEVICE).float()
+                    masks = masks.to(DEVICE).float().unsqueeze(1)
                     
                     outputs = self.model(images)
+                    
+                    # Ensure output and target have same shape
+                    if outputs.shape != masks.shape:
+                        masks = F.interpolate(masks, size=outputs.shape[2:], mode='nearest')
+                    
                     loss = self.criterion(outputs, masks)
                     
                     if not torch.isnan(loss):
@@ -564,7 +630,7 @@ class MycorrhizalTrainer:
     def load_model(self, checkpoint_path: str):
         """Load trained model with error handling"""
         try:
-            checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+            checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.train_losses = checkpoint.get('train_losses', [])
             self.val_losses = checkpoint.get('val_losses', [])
@@ -580,7 +646,7 @@ class MycorrhizalPredictor:
     def __init__(self, model_path: str):
         try:
             self.model = UNet(in_channels=3, out_channels=1).to(DEVICE)
-            checkpoint = torch.load(model_path, map_location=DEVICE)
+            checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=False)
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.eval()
             
@@ -645,8 +711,6 @@ class MycorrhizalPredictor:
                 'original_image_shape': (100, 100)
             }
 
-# Rest of the functions remain the same...
-# Add this debug function BEFORE your main() function
 def debug_file_matching():
     st.header("🔍 Debug File Matching")
     st.markdown("Let's see exactly what files exist and what the system is looking for")
@@ -854,13 +918,6 @@ def debug_file_matching():
                 else:
                     st.error(f"❌ Not found: `{test_mask}`")
 
-# The structure should be:
-# 1. All imports and class definitions (your current top part is correct)
-# 2. ALL function definitions BEFORE if __name__ == "__main__"
-# 3. if __name__ == "__main__": main() at the VERY END
-
-# Move these functions BEFORE the main() function:
-
 def training_data_tab():
     st.header("📚 Training Data Setup")
     
@@ -956,7 +1013,28 @@ def train_model_tab():
             
             st.info(f"📊 Found {len(images)} images and {len(masks)} masks")
             
-            if len(images) >= 5:
+            # CRITICAL WARNING for insufficient data
+            if len(images) < 25:
+                st.error("🚨 **CRITICAL WARNING: INSUFFICIENT TRAINING DATA**")
+                st.error(f"• You have only **{len(images)} images** (need 25+ for reliable results)")
+                st.error("• **Expected problems with {len(images)} images:**")
+                st.error("  - Model will severely overfit")
+                st.error("  - Will likely predict 100% colonization for everything")
+                st.error("  - Predictions will be unreliable")
+                st.error("• **Recommendation**: Add more diverse images before training")
+                
+                if len(images) < 10:
+                    st.error("⛔ **Training with <10 images is not recommended**")
+                    if st.checkbox("⚠️ I understand the risks and want to proceed anyway"):
+                        proceed_anyway = True
+                    else:
+                        proceed_anyway = False
+                else:
+                    proceed_anyway = True
+            else:
+                proceed_anyway = True
+            
+            if len(images) >= 5 and proceed_anyway:
                 # Training parameters
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -1165,7 +1243,6 @@ def model_management_tab():
             st.info("📭 No trained models found")
     else:
         st.info("📭 No models directory found")
-
 
 def main():
     st.title("🧬 Real Trainable Mycorrhizal AI System")
