@@ -1,18 +1,18 @@
 version: '3.8'
 
 services:
-  mycorrhizal-ai:
+  mycorrhizal-ai-trainable:
     build: 
       context: .
       dockerfile: Dockerfile
-    container_name: mycorrhizal-ai-container
+    container_name: mycorrhizal-ai-trainable
     ports:
       - "8501:8501"
     volumes:
       # Mount data directories to persist data
       - ./data:/app/data
       - ./models:/app/models
-      - ./temp:/app/temp
+      - ./results:/app/results
     environment:
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
@@ -29,9 +29,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 6G
         reservations:
-          memory: 2G
+          memory: 3G
     networks:
       - mycorrhizal-network
 
