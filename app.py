@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-REAL TRAINABLE MYCORRHIZAL AI SYSTEM
+REAL TRAINABLE MYCORRHIZAL AI SYSTEM - FIXED VERSION
 Train with real images + masks, achieve 80% accuracy with 25 images per species
 """
 
@@ -26,10 +26,18 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Tuple, Optional
 import warnings
+import traceback
 warnings.filterwarnings('ignore')
 
-# Set device
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Set device with better error handling
+try:
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()  # Clear GPU memory
+        st.success(f"🚀 GPU Available: {torch.cuda.get_device_name()}")
+except Exception as e:
+    DEVICE = torch.device('cpu')
+    st.info(f"🔧 Using CPU: {str(e)}")
 
 # Page config
 st.set_page_config(
@@ -39,13 +47,16 @@ st.set_page_config(
 )
 
 def create_directories():
-    """Create necessary directories"""
+    """Create necessary directories with error handling"""
     directories = [
         "data/raw", "data/masks", "data/augmented", "data/species",
         "models/trained", "models/checkpoints", "results", "temp"
     ]
     for directory in directories:
-        os.makedirs(directory, exist_ok=True)
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except Exception as e:
+            st.error(f"Failed to create directory {directory}: {e}")
 
 create_directories()
 
@@ -58,6 +69,9 @@ class MycorrhizalDataset(Dataset):
         self.mask_paths = mask_paths
         self.transform = transform
         self.augment = augment
+        
+        # Validate data integrity
+        assert len(image_paths) == len(mask_paths), "Mismatch between images and masks"
         
         # Advanced augmentation pipeline
         if augment:
@@ -97,30 +111,48 @@ class MycorrhizalDataset(Dataset):
         return len(self.image_paths)
     
     def __getitem__(self, idx):
-        # Load image and mask
-        image = cv2.imread(self.image_paths[idx])
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
-        
-        # Resize to standard size
-        image = cv2.resize(image, (256, 256))
-        mask = cv2.resize(mask, (256, 256))
-        
-        # Binary threshold for mask
-        mask = (mask > 127).astype(np.uint8)
-        
-        # Apply augmentations
-        if self.augmentation:
-            augmented = self.augmentation(image=image, mask=mask)
-            image = augmented['image']
-            mask = augmented['mask']
-        
-        # Convert mask to tensor if not already
-        if not isinstance(mask, torch.Tensor):
-            mask = torch.from_numpy(mask).float()
-        
-        return image, mask
+        try:
+            # Load image and mask
+            image = cv2.imread(self.image_paths[idx])
+            if image is None:
+                raise ValueError(f"Could not load image: {self.image_paths[idx]}")
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                raise ValueError(f"Could not load mask: {self.mask_paths[idx]}")
+            
+            # Resize to standard size
+            image = cv2.resize(image, (256, 256))
+            mask = cv2.resize(mask, (256, 256))
+            
+            # Binary threshold for mask - ensure proper binary format
+            mask = (mask > 127).astype(np.uint8)
+            
+            # Validate mask has both classes
+            if np.sum(mask) == 0:
+                st.warning(f"Mask {self.mask_paths[idx]} has no positive pixels")
+            elif np.sum(mask) == mask.size:
+                st.warning(f"Mask {self.mask_paths[idx]} is completely positive")
+            
+            # Apply augmentations
+            if self.augmentation:
+                augmented = self.augmentation(image=image, mask=mask)
+                image = augmented['image']
+                mask = augmented['mask']
+            
+            # Convert mask to tensor if not already
+            if not isinstance(mask, torch.Tensor):
+                mask = torch.from_numpy(mask).float()
+            
+            return image, mask
+            
+        except Exception as e:
+            st.error(f"Error loading data at index {idx}: {e}")
+            # Return a dummy sample to prevent crash
+            dummy_image = torch.zeros(3, 256, 256)
+            dummy_mask = torch.zeros(256, 256)
+            return dummy_image, dummy_mask
 
 class UNet(nn.Module):
     """U-Net architecture optimized for mycorrhizal segmentation"""
@@ -237,29 +269,54 @@ class MycorrhizalTrainer:
         self.val_ious = []
         self.val_dices = []
         
+        # Print model info
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        st.info(f"🧠 Model: {total_params:,} total params, {trainable_params:,} trainable")
+        
     def prepare_data(self, image_dir: str, mask_dir: str, 
                     train_split: float = 0.8) -> Tuple[DataLoader, DataLoader]:
         """Prepare training data with aggressive augmentation"""
         
-        # Get image and mask paths
+        # Get image and mask paths with better matching
         image_files = sorted([f for f in os.listdir(image_dir) 
                             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.tif'))])
         
         image_paths = []
         mask_paths = []
+        unmatched_images = []
         
         for img_file in image_files:
             img_path = os.path.join(image_dir, img_file)
-            # Try different mask naming conventions
-            mask_file = img_file.replace('.jpg', '_mask.png').replace('.jpeg', '_mask.png').replace('.tiff', '_mask.png')
-            mask_path = os.path.join(mask_dir, mask_file)
             
-            if os.path.exists(mask_path):
-                image_paths.append(img_path)
-                mask_paths.append(mask_path)
+            # Try multiple mask naming conventions
+            base_name = os.path.splitext(img_file)[0]
+            possible_mask_names = [
+                f"{base_name}_mask.png",
+                f"{base_name}_mask.jpg",
+                f"{base_name}.png",
+                img_file.replace('.jpg', '_mask.png').replace('.jpeg', '_mask.png').replace('.tiff', '_mask.png')
+            ]
+            
+            mask_found = False
+            for mask_name in possible_mask_names:
+                mask_path = os.path.join(mask_dir, mask_name)
+                if os.path.exists(mask_path):
+                    image_paths.append(img_path)
+                    mask_paths.append(mask_path)
+                    mask_found = True
+                    break
+            
+            if not mask_found:
+                unmatched_images.append(img_file)
+        
+        if unmatched_images:
+            st.warning(f"⚠️ {len(unmatched_images)} images without matching masks: {unmatched_images[:3]}...")
         
         if len(image_paths) < 5:
-            raise ValueError(f"Need at least 5 images, found {len(image_paths)}")
+            raise ValueError(f"Need at least 5 matched image-mask pairs, found {len(image_paths)}")
+        
+        st.success(f"✅ Found {len(image_paths)} matched image-mask pairs")
         
         # Split data
         total_size = len(image_paths)
@@ -269,98 +326,133 @@ class MycorrhizalTrainer:
         np.random.shuffle(indices)
         
         train_indices = indices[:train_size]
-        val_indices = indices[train_size:]
+        val_indices = indices[train_size:] if len(indices) > train_size else [indices[-1]]  # Ensure at least 1 val sample
         
         train_img_paths = [image_paths[i] for i in train_indices]
         train_mask_paths = [mask_paths[i] for i in train_indices]
         val_img_paths = [image_paths[i] for i in val_indices]
         val_mask_paths = [mask_paths[i] for i in val_indices]
         
+        st.info(f"📊 Training: {len(train_img_paths)} samples, Validation: {len(val_img_paths)} samples")
+        
         # Create datasets with aggressive augmentation for training
         train_dataset = MycorrhizalDataset(train_img_paths, train_mask_paths, augment=True)
         val_dataset = MycorrhizalDataset(val_img_paths, val_mask_paths, augment=False)
         
+        # Adjust batch size based on available memory
+        batch_size = 2 if DEVICE.type == 'cuda' else 1
+        
         # Create data loaders
-        train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         
         return train_loader, val_loader
     
     def calculate_metrics(self, predictions: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
-        """Calculate segmentation metrics"""
-        predictions = (predictions > 0.5).float()
-        
-        # Flatten for metric calculation
-        pred_flat = predictions.view(-1).cpu().numpy()
-        target_flat = targets.view(-1).cpu().numpy()
-        
-        # IoU (Jaccard)
-        intersection = np.logical_and(pred_flat, target_flat).sum()
-        union = np.logical_or(pred_flat, target_flat).sum()
-        iou = intersection / (union + 1e-8)
-        
-        # Dice
-        dice = 2 * intersection / (pred_flat.sum() + target_flat.sum() + 1e-8)
-        
-        # Pixel accuracy
-        pixel_acc = np.mean(pred_flat == target_flat)
-        
-        return {
-            'iou': iou,
-            'dice': dice,
-            'pixel_accuracy': pixel_acc
-        }
+        """Calculate segmentation metrics with error handling"""
+        try:
+            predictions = (predictions > 0.5).float()
+            
+            # Flatten for metric calculation
+            pred_flat = predictions.view(-1).cpu().numpy()
+            target_flat = targets.view(-1).cpu().numpy()
+            
+            # IoU (Jaccard)
+            intersection = np.logical_and(pred_flat, target_flat).sum()
+            union = np.logical_or(pred_flat, target_flat).sum()
+            iou = intersection / (union + 1e-8)
+            
+            # Dice
+            dice = 2 * intersection / (pred_flat.sum() + target_flat.sum() + 1e-8)
+            
+            # Pixel accuracy
+            pixel_acc = np.mean(pred_flat == target_flat)
+            
+            return {
+                'iou': float(iou),
+                'dice': float(dice),
+                'pixel_accuracy': float(pixel_acc)
+            }
+        except Exception as e:
+            st.error(f"Error calculating metrics: {e}")
+            return {'iou': 0.0, 'dice': 0.0, 'pixel_accuracy': 0.0}
     
     def train_epoch(self, train_loader: DataLoader) -> float:
-        """Train one epoch"""
+        """Train one epoch with error handling"""
         self.model.train()
         total_loss = 0
+        num_batches = 0
         
-        for batch_idx, (images, masks) in enumerate(train_loader):
-            images = images.to(DEVICE)
-            masks = masks.to(DEVICE).unsqueeze(1)
-            
-            self.optimizer.zero_grad()
-            
-            outputs = self.model(images)
-            loss = self.criterion(outputs, masks)
-            
-            loss.backward()
-            self.optimizer.step()
-            
-            total_loss += loss.item()
-        
-        return total_loss / len(train_loader)
-    
-    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
-        """Validate model"""
-        self.model.eval()
-        total_loss = 0
-        all_metrics = {'iou': [], 'dice': [], 'pixel_accuracy': []}
-        
-        with torch.no_grad():
-            for images, masks in val_loader:
+        try:
+            for batch_idx, (images, masks) in enumerate(train_loader):
                 images = images.to(DEVICE)
                 masks = masks.to(DEVICE).unsqueeze(1)
                 
+                self.optimizer.zero_grad()
+                
                 outputs = self.model(images)
                 loss = self.criterion(outputs, masks)
-                total_loss += loss.item()
                 
-                # Calculate metrics
-                metrics = self.calculate_metrics(outputs, masks)
-                for key, value in metrics.items():
-                    all_metrics[key].append(value)
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    st.warning(f"NaN loss detected at batch {batch_idx}")
+                    continue
+                
+                loss.backward()
+                
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
+                self.optimizer.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+                
+        except Exception as e:
+            st.error(f"Error during training epoch: {e}")
+            return float('inf')
+        
+        return total_loss / max(num_batches, 1)
+    
+    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
+        """Validate model with error handling"""
+        self.model.eval()
+        total_loss = 0
+        all_metrics = {'iou': [], 'dice': [], 'pixel_accuracy': []}
+        num_batches = 0
+        
+        try:
+            with torch.no_grad():
+                for images, masks in val_loader:
+                    images = images.to(DEVICE)
+                    masks = masks.to(DEVICE).unsqueeze(1)
+                    
+                    outputs = self.model(images)
+                    loss = self.criterion(outputs, masks)
+                    
+                    if not torch.isnan(loss):
+                        total_loss += loss.item()
+                        num_batches += 1
+                        
+                        # Calculate metrics
+                        metrics = self.calculate_metrics(outputs, masks)
+                        for key, value in metrics.items():
+                            all_metrics[key].append(value)
+        except Exception as e:
+            st.error(f"Error during validation: {e}")
         
         # Average metrics
-        avg_metrics = {key: np.mean(values) for key, values in all_metrics.items()}
-        avg_metrics['loss'] = total_loss / len(val_loader)
+        avg_metrics = {}
+        for key, values in all_metrics.items():
+            avg_metrics[key] = np.mean(values) if values else 0.0
+        
+        avg_metrics['loss'] = total_loss / max(num_batches, 1)
         
         return avg_metrics
     
     def train(self, train_loader: DataLoader, val_loader: DataLoader, 
               epochs: int = 100, patience: int = 20) -> Dict:
-        """Full training loop with early stopping"""
+        """Full training loop with early stopping and error handling"""
         
         best_val_loss = float('inf')
         patience_counter = 0
@@ -369,7 +461,8 @@ class MycorrhizalTrainer:
             'epochs_trained': 0,
             'best_val_loss': float('inf'),
             'best_val_iou': 0,
-            'final_metrics': {}
+            'final_metrics': {},
+            'training_successful': False
         }
         
         st.info(f"🚀 Starting training for {self.species_name} with {len(train_loader.dataset)} training samples")
@@ -378,138 +471,181 @@ class MycorrhizalTrainer:
         status_text = st.empty()
         metrics_placeholder = st.empty()
         
-        for epoch in range(epochs):
-            # Training
-            train_loss = self.train_epoch(train_loader)
-            self.train_losses.append(train_loss)
+        try:
+            for epoch in range(epochs):
+                # Training
+                train_loss = self.train_epoch(train_loader)
+                self.train_losses.append(train_loss)
+                
+                # Validation
+                val_metrics = self.validate(val_loader)
+                val_loss = val_metrics['loss']
+                val_iou = val_metrics['iou']
+                val_dice = val_metrics['dice']
+                
+                self.val_losses.append(val_loss)
+                self.val_ious.append(val_iou)
+                self.val_dices.append(val_dice)
+                
+                # Learning rate scheduling
+                if not np.isnan(val_loss) and not np.isinf(val_loss):
+                    self.scheduler.step(val_loss)
+                
+                # Early stopping
+                if val_loss < best_val_loss and not np.isnan(val_loss):
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    # Save best model
+                    self.save_checkpoint(epoch, val_metrics, is_best=True)
+                    training_log['best_val_loss'] = val_loss
+                    training_log['best_val_iou'] = val_iou
+                    training_log['training_successful'] = True
+                else:
+                    patience_counter += 1
+                
+                # Update UI
+                progress = (epoch + 1) / epochs
+                progress_bar.progress(progress)
+                
+                status_text.text(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val IoU: {val_iou:.4f}")
+                
+                # Display metrics
+                col1, col2, col3, col4 = metrics_placeholder.columns(4)
+                col1.metric("Train Loss", f"{train_loss:.4f}")
+                col2.metric("Val IoU", f"{val_iou:.4f}")
+                col3.metric("Val Dice", f"{val_dice:.4f}")
+                col4.metric("Pixel Acc", f"{val_metrics['pixel_accuracy']:.4f}")
+                
+                if patience_counter >= patience:
+                    st.success(f"🎯 Early stopping at epoch {epoch+1}")
+                    break
+                    
+                # Emergency stop if loss becomes NaN
+                if np.isnan(train_loss) or np.isnan(val_loss):
+                    st.error("❌ Training stopped due to NaN loss")
+                    break
             
-            # Validation
-            val_metrics = self.validate(val_loader)
-            val_loss = val_metrics['loss']
-            val_iou = val_metrics['iou']
-            val_dice = val_metrics['dice']
+            training_log['epochs_trained'] = epoch + 1
+            training_log['final_metrics'] = val_metrics
             
-            self.val_losses.append(val_loss)
-            self.val_ious.append(val_iou)
-            self.val_dices.append(val_dice)
-            
-            # Learning rate scheduling
-            self.scheduler.step(val_loss)
-            
-            # Early stopping
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                # Save best model
-                self.save_checkpoint(epoch, val_metrics, is_best=True)
-                training_log['best_val_loss'] = val_loss
-                training_log['best_val_iou'] = val_iou
-            else:
-                patience_counter += 1
-            
-            # Update UI
-            progress = (epoch + 1) / epochs
-            progress_bar.progress(progress)
-            
-            status_text.text(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val IoU: {val_iou:.4f}")
-            
-            # Display metrics
-            col1, col2, col3, col4 = metrics_placeholder.columns(4)
-            col1.metric("Train Loss", f"{train_loss:.4f}")
-            col2.metric("Val IoU", f"{val_iou:.4f}")
-            col3.metric("Val Dice", f"{val_dice:.4f}")
-            col4.metric("Pixel Acc", f"{val_metrics['pixel_accuracy']:.4f}")
-            
-            if patience_counter >= patience:
-                st.success(f"🎯 Early stopping at epoch {epoch+1}")
-                break
-        
-        training_log['epochs_trained'] = epoch + 1
-        training_log['final_metrics'] = val_metrics
+        except Exception as e:
+            st.error(f"❌ Training failed with error: {e}")
+            st.error(traceback.format_exc())
+            training_log['training_successful'] = False
         
         return training_log
     
     def save_checkpoint(self, epoch: int, metrics: Dict, is_best: bool = False):
-        """Save model checkpoint"""
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'metrics': metrics,
-            'species_name': self.species_name,
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
-            'val_ious': self.val_ious,
-            'val_dices': self.val_dices
-        }
-        
-        checkpoint_dir = os.path.join("models/trained", self.species_name)
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        if is_best:
-            torch.save(checkpoint, os.path.join(checkpoint_dir, 'best_model.pth'))
-        
-        torch.save(checkpoint, os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pth'))
+        """Save model checkpoint with error handling"""
+        try:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'metrics': metrics,
+                'species_name': self.species_name,
+                'train_losses': self.train_losses,
+                'val_losses': self.val_losses,
+                'val_ious': self.val_ious,
+                'val_dices': self.val_dices
+            }
+            
+            checkpoint_dir = os.path.join("models/trained", self.species_name)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            
+            if is_best:
+                torch.save(checkpoint, os.path.join(checkpoint_dir, 'best_model.pth'))
+            
+            torch.save(checkpoint, os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pth'))
+            
+        except Exception as e:
+            st.error(f"Error saving checkpoint: {e}")
     
     def load_model(self, checkpoint_path: str):
-        """Load trained model"""
-        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.train_losses = checkpoint.get('train_losses', [])
-        self.val_losses = checkpoint.get('val_losses', [])
-        self.val_ious = checkpoint.get('val_ious', [])
-        return checkpoint['metrics']
+        """Load trained model with error handling"""
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.train_losses = checkpoint.get('train_losses', [])
+            self.val_losses = checkpoint.get('val_losses', [])
+            self.val_ious = checkpoint.get('val_ious', [])
+            return checkpoint['metrics']
+        except Exception as e:
+            st.error(f"Error loading model: {e}")
+            return {}
 
 class MycorrhizalPredictor:
     """Real-time prediction with trained models"""
     
     def __init__(self, model_path: str):
-        self.model = UNet(in_channels=3, out_channels=1).to(DEVICE)
-        checkpoint = torch.load(model_path, map_location=DEVICE)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model.eval()
-        
-        self.transform = A.Compose([
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
-        ])
+        try:
+            self.model = UNet(in_channels=3, out_channels=1).to(DEVICE)
+            checkpoint = torch.load(model_path, map_location=DEVICE)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.model.eval()
+            
+            self.transform = A.Compose([
+                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ToTensorV2()
+            ])
+            
+            st.success("✅ Model loaded successfully")
+            
+        except Exception as e:
+            st.error(f"Error loading predictor: {e}")
+            raise
     
     def predict(self, image_path: str) -> Dict:
-        """Predict mycorrhizal colonization"""
-        # Load and preprocess image
-        image = cv2.imread(image_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        original_shape = image.shape[:2]
-        
-        # Resize for model
-        image_resized = cv2.resize(image, (256, 256))
-        
-        # Transform
-        transformed = self.transform(image=image_resized)
-        image_tensor = transformed['image'].unsqueeze(0).to(DEVICE)
-        
-        with torch.no_grad():
-            prediction = self.model(image_tensor)
-            prediction = prediction.squeeze().cpu().numpy()
-        
-        # Resize back to original shape
-        prediction_resized = cv2.resize(prediction, (original_shape[1], original_shape[0]))
-        
-        # Calculate metrics
-        binary_mask = (prediction_resized > 0.5).astype(np.uint8)
-        colonization_percentage = (np.sum(binary_mask) / binary_mask.size) * 100
-        
-        # Confidence based on prediction clarity
-        confidence = np.std(prediction_resized)  # Higher std = more confident boundaries
-        
-        return {
-            'colonization_percentage': colonization_percentage,
-            'confidence': min(confidence * 10, 1.0),  # Scale to 0-1
-            'binary_mask': binary_mask,
-            'probability_mask': prediction_resized,
-            'original_image_shape': original_shape
-        }
+        """Predict mycorrhizal colonization with error handling"""
+        try:
+            # Load and preprocess image
+            image = cv2.imread(image_path)
+            if image is None:
+                raise ValueError(f"Could not load image: {image_path}")
+                
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            original_shape = image.shape[:2]
+            
+            # Resize for model
+            image_resized = cv2.resize(image, (256, 256))
+            
+            # Transform
+            transformed = self.transform(image=image_resized)
+            image_tensor = transformed['image'].unsqueeze(0).to(DEVICE)
+            
+            with torch.no_grad():
+                prediction = self.model(image_tensor)
+                prediction = prediction.squeeze().cpu().numpy()
+            
+            # Resize back to original shape
+            prediction_resized = cv2.resize(prediction, (original_shape[1], original_shape[0]))
+            
+            # Calculate metrics
+            binary_mask = (prediction_resized > 0.5).astype(np.uint8)
+            colonization_percentage = (np.sum(binary_mask) / binary_mask.size) * 100
+            
+            # Confidence based on prediction clarity
+            confidence = np.std(prediction_resized)  # Higher std = more confident boundaries
+            
+            return {
+                'colonization_percentage': float(colonization_percentage),
+                'confidence': float(min(confidence * 10, 1.0)),  # Scale to 0-1
+                'binary_mask': binary_mask,
+                'probability_mask': prediction_resized,
+                'original_image_shape': original_shape
+            }
+            
+        except Exception as e:
+            st.error(f"Error during prediction: {e}")
+            return {
+                'colonization_percentage': 0.0,
+                'confidence': 0.0,
+                'binary_mask': np.zeros((100, 100)),
+                'probability_mask': np.zeros((100, 100)),
+                'original_image_shape': (100, 100)
+            }
 
+# Rest of the functions remain the same...
 def main():
     st.title("🧬 Real Trainable Mycorrhizal AI System")
     st.markdown("### Train with 25 images + masks → Achieve 80% accuracy")
@@ -617,7 +753,9 @@ def train_model_tab():
     st.header("🚀 Train New AI Model")
     
     # Species selection
-    species_dirs = [d for d in os.listdir("data/species") if os.path.isdir(os.path.join("data/species", d))]
+    species_dirs = []
+    if os.path.exists("data/species"):
+        species_dirs = [d for d in os.listdir("data/species") if os.path.isdir(os.path.join("data/species", d))]
     
     if not species_dirs:
         st.warning("⚠️ No species data found. Please setup training data first.")
@@ -659,24 +797,29 @@ def train_model_tab():
                         training_log = trainer.train(train_loader, val_loader, epochs, patience)
                         
                         # Save training log
-                        log_path = os.path.join("models/trained", selected_species, "training_log.json")
-                        with open(log_path, 'w') as f:
-                            json.dump(training_log, f, indent=2)
-                        
-                        # Display results
-                        st.success("🎉 Training completed!")
-                        
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Epochs Trained", training_log['epochs_trained'])
-                        col2.metric("Best Val IoU", f"{training_log['best_val_iou']:.3f}")
-                        col3.metric("Final Accuracy", f"{training_log['final_metrics']['pixel_accuracy']:.1%}")
-                        
-                        if training_log['best_val_iou'] > 0.8:
-                            st.balloons()
-                            st.success("🎯 Achieved >80% accuracy target!")
+                        if training_log['training_successful']:
+                            log_path = os.path.join("models/trained", selected_species, "training_log.json")
+                            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                            with open(log_path, 'w') as f:
+                                json.dump(training_log, f, indent=2)
+                            
+                            # Display results
+                            st.success("🎉 Training completed!")
+                            
+                            col1, col2, col3 = st.columns(3)
+                            col1.metric("Epochs Trained", training_log['epochs_trained'])
+                            col2.metric("Best Val IoU", f"{training_log['best_val_iou']:.3f}")
+                            col3.metric("Final Accuracy", f"{training_log['final_metrics']['pixel_accuracy']:.1%}")
+                            
+                            if training_log['best_val_iou'] > 0.8:
+                                st.balloons()
+                                st.success("🎯 Achieved >80% accuracy target!")
+                        else:
+                            st.error("❌ Training was not successful")
                         
                     except Exception as e:
                         st.error(f"❌ Training failed: {str(e)}")
+                        st.error(traceback.format_exc())
             else:
                 st.warning(f"⚠️ Need at least 5 images, found {len(images)}")
 
@@ -779,6 +922,7 @@ def test_model_tab():
                 
             except Exception as e:
                 st.error(f"❌ Prediction failed: {str(e)}")
+                st.error(traceback.format_exc())
 
 def model_management_tab():
     st.header("📊 Model Management")
@@ -804,14 +948,18 @@ def model_management_tab():
                         
                         # Load training log if available
                         if os.path.exists(log_path):
-                            with open(log_path, 'r') as f:
-                                log = json.load(f)
-                            
-                            col1, col2, col3, col4 = st.columns(4)
-                            col1.metric("Epochs", log['epochs_trained'])
-                            col2.metric("Best IoU", f"{log['best_val_iou']:.3f}")
-                            col3.metric("Val Loss", f"{log['best_val_loss']:.4f}")
-                            col4.metric("Accuracy", f"{log['final_metrics']['pixel_accuracy']:.1%}")
+                            try:
+                                with open(log_path, 'r') as f:
+                                    log = json.load(f)
+                                
+                                col1, col2, col3, col4 = st.columns(4)
+                                col1.metric("Epochs", log['epochs_trained'])
+                                col2.metric("Best IoU", f"{log['best_val_iou']:.3f}")
+                                col3.metric("Val Loss", f"{log['best_val_loss']:.4f}")
+                                if 'final_metrics' in log and 'pixel_accuracy' in log['final_metrics']:
+                                    col4.metric("Accuracy", f"{log['final_metrics']['pixel_accuracy']:.1%}")
+                            except Exception as e:
+                                st.error(f"Error loading log: {e}")
                         
                         # Model actions
                         col1, col2 = st.columns(2)
@@ -822,10 +970,13 @@ def model_management_tab():
                         
                         with col2:
                             if st.button(f"🗑️ Delete Model", key=f"delete_{species}"):
-                                import shutil
-                                shutil.rmtree(model_dir)
-                                st.success(f"✅ {species} model deleted")
-                                st.rerun()
+                                try:
+                                    import shutil
+                                    shutil.rmtree(model_dir)
+                                    st.success(f"✅ {species} model deleted")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error deleting model: {e}")
                     else:
                         st.warning("⚠️ Model training in progress or failed")
         else:
