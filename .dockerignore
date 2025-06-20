@@ -3,6 +3,7 @@
 # Data directories (will be mounted as volumes)
 data/
 models/
+results/
 temp/
 
 # Large files
@@ -94,7 +95,6 @@ docker-compose*
 *.zip
 *.tar.gz
 *.rar
-results/
 
 # Jupyter notebooks
 *.ipynb
