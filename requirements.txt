@@ -1,9 +1,9 @@
-# Pre-Trained Mycorrhizal AI System Requirements
+# Real Trainable Mycorrhizal AI System Requirements
 # Core AI Framework
 torch>=2.0.0
 torchvision>=0.15.0
 
-# Web Framework
+# Web Framework  
 streamlit>=1.28.0
 
 # Data Science & ML
@@ -12,9 +12,10 @@ numpy>=1.21.0
 scikit-learn>=1.1.0
 scipy>=1.8.0
 
-# Image Processing
+# Image Processing & Augmentation
 Pillow>=9.0.0
 opencv-python-headless>=4.6.0
+albumentations>=1.3.0
 
 # Visualization
 matplotlib>=3.5.0
