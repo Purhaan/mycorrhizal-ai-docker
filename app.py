@@ -646,38 +646,220 @@ class MycorrhizalPredictor:
             }
 
 # Rest of the functions remain the same...
-def main():
-    st.title("🧬 Real Trainable Mycorrhizal AI System")
-    st.markdown("### Train with 25 images + masks → Achieve 80% accuracy")
+# Add this debug function BEFORE your main() function
+def debug_file_matching():
+    st.header("🔍 Debug File Matching")
+    st.markdown("Let's see exactly what files exist and what the system is looking for")
     
-    # System status
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success("✅ Real Training Ready")
-    with col2:
-        st.info(f"🔧 Device: {DEVICE}")
-    with col3:
-        st.info("🎯 U-Net Architecture")
+    # Species selection
+    species_dirs = []
+    if os.path.exists("data/species"):
+        species_dirs = [d for d in os.listdir("data/species") if os.path.isdir(os.path.join("data/species", d))]
     
-    # Main tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📚 Training Data Setup",
-        "🚀 Train New Model", 
-        "🔍 Test Trained Model",
-        "📊 Model Management"
-    ])
+    if not species_dirs:
+        st.error("❌ No species directories found")
+        return
     
-    with tab1:
-        training_data_tab()
+    selected_species = st.selectbox("Select Species to Debug:", species_dirs)
     
-    with tab2:
-        train_model_tab()
-    
-    with tab3:
-        test_model_tab()
-    
-    with tab4:
-        model_management_tab()
+    if selected_species:
+        images_dir = os.path.join("data/species", selected_species, "images")
+        masks_dir = os.path.join("data/species", selected_species, "masks")
+        
+        st.subheader(f"🧬 Debugging: {selected_species}")
+        
+        # Check if directories exist
+        col1, col2 = st.columns(2)
+        with col1:
+            if os.path.exists(images_dir):
+                st.success(f"✅ Images directory exists: `{images_dir}`")
+            else:
+                st.error(f"❌ Images directory missing: `{images_dir}`")
+                return
+        
+        with col2:
+            if os.path.exists(masks_dir):
+                st.success(f"✅ Masks directory exists: `{masks_dir}`")
+            else:
+                st.error(f"❌ Masks directory missing: `{masks_dir}`")
+                return
+        
+        # Get ALL files (not just valid extensions)
+        try:
+            all_image_files = os.listdir(images_dir)
+            all_mask_files = os.listdir(masks_dir)
+        except Exception as e:
+            st.error(f"❌ Error reading directories: {e}")
+            return
+        
+        st.markdown("---")
+        
+        # Show ALL files found
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📂 ALL Files in Images Directory")
+            st.code(f"Path: {images_dir}")
+            if all_image_files:
+                for i, file in enumerate(all_image_files, 1):
+                    file_path = os.path.join(images_dir, file)
+                    size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                    st.write(f"{i}. `{file}` ({size:,} bytes)")
+                st.info(f"Total files: {len(all_image_files)}")
+            else:
+                st.warning("📭 No files found in images directory")
+        
+        with col2:
+            st.subheader("📂 ALL Files in Masks Directory")
+            st.code(f"Path: {masks_dir}")
+            if all_mask_files:
+                for i, file in enumerate(all_mask_files, 1):
+                    file_path = os.path.join(masks_dir, file)
+                    size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                    st.write(f"{i}. `{file}` ({size:,} bytes)")
+                st.info(f"Total files: {len(all_mask_files)}")
+            else:
+                st.warning("📭 No files found in masks directory")
+        
+        st.markdown("---")
+        
+        # Filter valid image files
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.tiff', '.tif')
+        valid_image_files = [f for f in all_image_files if f.lower().endswith(valid_extensions)]
+        valid_mask_files = [f for f in all_mask_files if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        
+        st.subheader("🎯 Valid Files (by extension)")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Valid Images:**")
+            for img in valid_image_files:
+                st.write(f"• `{img}`")
+            st.info(f"Valid images: {len(valid_image_files)}")
+        
+        with col2:
+            st.write("**Valid Masks:**")
+            for mask in valid_mask_files:
+                st.write(f"• `{mask}`")
+            st.info(f"Valid masks: {len(valid_mask_files)}")
+        
+        st.markdown("---")
+        
+        # Test matching logic
+        st.subheader("🔗 Testing Matching Logic")
+        
+        if valid_image_files:
+            st.write("**For each image, looking for these mask names:**")
+            
+            found_matches = []
+            
+            for img_file in valid_image_files:
+                base_name = os.path.splitext(img_file)[0]
+                
+                # All possible mask names we're looking for
+                possible_mask_names = [
+                    f"{base_name}_mask.png",
+                    f"{base_name}_mask.jpg",
+                    f"{base_name}-mask.png",
+                    f"{base_name}mask.png",
+                    f"{base_name}.png",
+                ]
+                
+                with st.expander(f"🔍 For image: `{img_file}`"):
+                    st.write("**Looking for any of these mask files:**")
+                    
+                    match_found = False
+                    for mask_name in possible_mask_names:
+                        mask_path = os.path.join(masks_dir, mask_name)
+                        exists = os.path.exists(mask_path)
+                        
+                        if exists:
+                            st.success(f"✅ `{mask_name}` - **FOUND**")
+                            found_matches.append((img_file, mask_name))
+                            match_found = True
+                        else:
+                            st.write(f"❌ `{mask_name}` - not found")
+                    
+                    if not match_found:
+                        st.error("❌ **No matching mask found for this image**")
+                        
+                        # Show what mask files actually exist
+                        st.write("**Available mask files:**")
+                        for mask in valid_mask_files:
+                            st.write(f"• `{mask}`")
+            
+            # Summary
+            st.markdown("---")
+            st.subheader("📊 Matching Summary")
+            
+            if found_matches:
+                st.success(f"✅ Found {len(found_matches)} matches:")
+                for img, mask in found_matches:
+                    st.write(f"• `{img}` ↔ `{mask}`")
+            else:
+                st.error("❌ **NO MATCHES FOUND!**")
+                
+                st.markdown("""
+                ### 🛠️ **Fix Required:**
+                
+                **The Problem:** Your mask file names don't match the expected patterns.
+                
+                **Solutions:**
+                """)
+                
+                # Show specific renaming needed
+                if valid_image_files and valid_mask_files:
+                    st.markdown("**Option 1: Rename masks to match images**")
+                    
+                    if len(valid_image_files) == len(valid_mask_files):
+                        st.info("✅ Same number of images and masks - can pair them")
+                        
+                        rename_suggestions = []
+                        for i, (img, current_mask) in enumerate(zip(valid_image_files, valid_mask_files)):
+                            base_name = os.path.splitext(img)[0]
+                            suggested_name = f"{base_name}_mask.png"
+                            rename_suggestions.append((current_mask, suggested_name))
+                        
+                        st.write("**Rename these files:**")
+                        for old_name, new_name in rename_suggestions[:10]:
+                            st.code(f"mv '{old_name}' '{new_name}'")
+                        
+                        if len(rename_suggestions) > 10:
+                            st.write(f"... and {len(rename_suggestions)-10} more")
+                    
+                    else:
+                        st.warning(f"⚠️ Number mismatch: {len(valid_image_files)} images vs {len(valid_mask_files)} masks")
+        
+        # Manual file existence check
+        st.markdown("---")
+        st.subheader("🧪 Manual File Check")
+        st.markdown("Enter exact filenames to check if they exist:")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            test_image = st.text_input("Image filename:", placeholder="e.g., IMG10_original.png")
+            if test_image:
+                img_path = os.path.join(images_dir, test_image)
+                if os.path.exists(img_path):
+                    st.success(f"✅ Found: `{test_image}`")
+                else:
+                    st.error(f"❌ Not found: `{test_image}`")
+        
+        with col2:
+            test_mask = st.text_input("Mask filename:", placeholder="e.g., IMG10_original_mask.png")
+            if test_mask:
+                mask_path = os.path.join(masks_dir, test_mask)
+                if os.path.exists(mask_path):
+                    st.success(f"✅ Found: `{test_mask}`")
+                else:
+                    st.error(f"❌ Not found: `{test_mask}`")
+
+# The structure should be:
+# 1. All imports and class definitions (your current top part is correct)
+# 2. ALL function definitions BEFORE if __name__ == "__main__"
+# 3. if __name__ == "__main__": main() at the VERY END
+
+# Move these functions BEFORE the main() function:
 
 def training_data_tab():
     st.header("📚 Training Data Setup")
@@ -984,5 +1166,44 @@ def model_management_tab():
     else:
         st.info("📭 No models directory found")
 
+
+def main():
+    st.title("🧬 Real Trainable Mycorrhizal AI System")
+    st.markdown("### Train with 25 images + masks → Achieve 80% accuracy")
+    
+    # System status
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.success("✅ Real Training Ready")
+    with col2:
+        st.info(f"🔧 Device: {DEVICE}")
+    with col3:
+        st.info("🎯 U-Net Architecture")
+    
+    # Main tabs - ADDED DEBUG TAB
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📚 Training Data Setup",
+        "🚀 Train New Model", 
+        "🔍 Test Trained Model",
+        "📊 Model Management",
+        "🔧 Debug Files"  # NEW DEBUG TAB
+    ])
+    
+    with tab1:
+        training_data_tab()
+    
+    with tab2:
+        train_model_tab()
+    
+    with tab3:
+        test_model_tab()
+    
+    with tab4:
+        model_management_tab()
+    
+    with tab5:  # NEW DEBUG TAB
+        debug_file_matching()
+
+# This should be at the VERY END
 if __name__ == "__main__":
     main()
