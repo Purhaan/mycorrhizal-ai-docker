@@ -1,0 +1,111 @@
+# Docker ignore file to optimize build and reduce image size
+
+# Data directories (will be mounted as volumes)
+data/
+models/
+temp/
+
+# Large files
+*.pth
+*.pkl
+*.h5
+*.model
+*.weights
+
+# Image files
+*.tiff
+*.tif
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+ENV/
+env.bak/
+venv.bak/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.spyderproject
+.spyproject
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.directory
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Logs
+*.log
+logs/
+log/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Documentation
+README*.md
+docs/
+*.md
+
+# Docker files (avoid recursion)
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Large datasets and results
+*.csv
+*.xlsx
+*.xls
+*.json
+*.zip
+*.tar.gz
+*.rar
+results/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Node.js (if any)
+node_modules/
+npm-debug.log*
+
+# Other
+.cache/
+.mypy_cache/
+.pytest_cache/
+htmlcov/
