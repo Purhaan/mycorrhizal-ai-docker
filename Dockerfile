@@ -1,4 +1,4 @@
-# Dockerfile for Pre-Trained Mycorrhizal AI System
+# Dockerfile for Real Trainable Mycorrhizal AI System
 FROM python:3.9-slim
 
 # Set working directory
@@ -27,9 +27,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY app.py .
 
 # Create necessary directories with proper permissions
-RUN mkdir -p data/raw data/annotations data/pretrained data/results \
-    models/pretrained models/finetuned temp && \
-    chmod -R 777 data/ models/ temp/
+RUN mkdir -p data/species data/prepared_masks data/temp \
+    models/trained models/checkpoints results && \
+    chmod -R 777 data/ models/ results/
 
 # Expose port for Streamlit
 EXPOSE 8501
